@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="fr">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Compress & Accélère</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="app">
+      <div class="left">
+        <div class="top-btns">
+          <button id="btn-add" class="btn accent" type="button">Ajouter</button>
+          <button id="btn-clear" class="btn ghost" type="button">Vider</button>
+        </div>
+
+        <section class="card params">
+          <h1>Paramètres</h1>
+
+          <label class="muted">Taille souhaitée</label>
+          <div class="size-row">
+            <input id="target-mb" type="number" min="1" step="0.5" value="9" />
+            <span>Mo</span>
+            <span class="muted grow right">Taille réelle</span>
+            <strong id="real-size" class="accent-text">—</strong>
+          </div>
+
+          <div class="two-col">
+            <div>
+              <label class="muted">Supprimer l'audio</label>
+              <input id="mute" type="checkbox" />
+            </div>
+            <div>
+              <label class="muted">Vitesse</label>
+              <select id="speed">
+                <option value="1">1×</option>
+                <option value="1.25">1,25×</option>
+                <option value="1.5">1,5×</option>
+                <option value="2">2×</option>
+                <option value="3">3×</option>
+                <option value="4">4×</option>
+              </select>
+            </div>
+          </div>
+
+          <select id="file-list" disabled>
+            <option>Aucune vidéo</option>
+          </select>
+          <p id="meta" class="muted meta"></p>
+
+          <div class="actions">
+            <button id="btn-start" class="btn accent" type="button">Lancer</button>
+            <button id="btn-cancel" class="btn ghost" type="button" disabled>Annuler</button>
+            <button id="btn-remove" class="btn ghost" type="button">Retirer cette vidéo</button>
+          </div>
+
+          <p id="summary" class="muted summary"></p>
+
+          <div class="out-row">
+            <input id="out-name" type="text" placeholder="nom_du_fichier.mp4" />
+            <button id="btn-download" class="btn ghost" type="button">Dossier</button>
+            <button id="btn-copy" class="btn ghost" type="button">Copie</button>
+          </div>
+        </section>
+      </div>
+
+      <section class="card preview-card">
+        <div class="preview-wrap">
+          <video id="preview" playsinline></video>
+          <div id="preview-empty">Aperçu vidéo</div>
+        </div>
+        <div class="transport">
+          <button id="btn-play" class="btn accent play" type="button">▶</button>
+          <input id="seek" type="range" min="0" max="1" step="0.01" value="0" />
+          <span id="time" class="muted">0:00 / 0:00</span>
+        </div>
+        <div class="progress-wrap">
+          <div class="progress"><div id="bar"></div></div>
+          <p id="status" class="muted">Chargement de FFmpeg…</p>
+          <p class="muted hint">Tout reste dans votre navigateur. Le premier chargement télécharge FFmpeg.</p>
+        </div>
+      </section>
+    </main>
+
+    <input id="file-input" type="file" accept="video/*" multiple hidden />
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

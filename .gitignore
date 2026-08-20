@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+vendor/
+*.mp4
+*.mov
+*.mkv
+*.avi
+*.webm
+.DS_Store
+Thumbs.db
