@@ -381,8 +381,9 @@ class App(ctk.CTk):
 
     def _clear_preview(self) -> None:
         self.pause_preview()
-        self._preview_ctk = None
-        self.preview_label.configure(image=None, text="Aperçu vidéo")
+        blank = Image.new("RGB", (2, 2), "#0b1016")
+        self._preview_ctk = ctk.CTkImage(light_image=blank, dark_image=blank, size=(2, 2))
+        self.preview_label.configure(image=self._preview_ctk, text="Aperçu vidéo")
         self.seek_var.set(0)
         self.seek_slider.configure(to=1)
         self.time_label.configure(text="0:00 / 0:00")

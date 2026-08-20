@@ -20,7 +20,7 @@ Utilisation :
 2. **Ajouter** une vidéo.
 3. Indiquez la taille en Mo, la vitesse, et éventuellement **Supprimer l'audio**.
 4. **Lancer**. Le fichier MP4 se télécharge ensuite.
-5. **Dossier** / **Copie** relancent le téléchargement du dernier export.
+5. **Télécharger** relance le téléchargement du dernier export.
 
 Le premier chargement télécharge FFmpeg (~25 Mo), puis le navigateur le garde en cache.
 

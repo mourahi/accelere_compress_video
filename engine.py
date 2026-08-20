@@ -9,6 +9,7 @@ import queue
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -18,8 +19,21 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-APP_DIR = Path(__file__).resolve().parent
-VENDOR_DIR = APP_DIR / "vendor" / "ffmpeg"
+
+def _app_dir() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
+def _vendor_dir() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "CompressAccelere" / "ffmpeg"
+    return _app_dir() / "vendor" / "ffmpeg"
+
+
+APP_DIR = _app_dir()
+VENDOR_DIR = _vendor_dir()
 FFMPEG_URL = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
 
 ProgressCb = Callable[[float, str], None]

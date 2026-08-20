@@ -239,6 +239,15 @@ select {
   background: var(--accent);
 }
 
+#status.ok {
+  color: var(--accent);
+  font-weight: 700;
+}
+
+#status.err {
+  color: #f87171;
+}
+
 .hint {
   margin: 8px 0 0;
   font-size: 12px;

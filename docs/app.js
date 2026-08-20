@@ -1,5 +1,9 @@
-import { FFmpeg } from "https://unpkg.com/@ffmpeg/ffmpeg@0.12.10/dist/esm/index.js";
-import { fetchFile, toBlobURL } from "https://unpkg.com/@ffmpeg/util@0.12.1/dist/esm/index.js";
+import { FFmpeg } from "./vendor/ffmpeg/index.js";
+
+const CORE_MIRRORS = [
+  "https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.10/dist/esm",
+  "https://unpkg.com/@ffmpeg/core@0.12.10/dist/esm",
+];
 
 const SPEED_LABELS = {
   1: "1×",
@@ -90,9 +94,11 @@ function atempoFilter(speed) {
   return parts.join(",");
 }
 
-function setProgress(pct, message) {
+function setProgress(pct, message, kind) {
   els.bar.style.width = `${Math.max(0, Math.min(100, pct * 100))}%`;
   if (message) els.status.textContent = message;
+  els.status.classList.remove("ok", "err");
+  if (kind) els.status.classList.add(kind);
 }
 
 function refreshSummary() {
@@ -176,30 +182,137 @@ function downloadBlob(blob, name) {
   setTimeout(() => URL.revokeObjectURL(url), 2000);
 }
 
-async function loadFfmpeg() {
-  const base = "https://unpkg.com/@ffmpeg/core@0.12.6/dist/esm";
+async function fetchFile(file) {
+  return new Uint8Array(await file.arrayBuffer());
+}
+
+async function toBlobURL(url, mimeType, onProgress) {
+  const response = await fetch(url);
+  if (!response.ok) throw new Error(`Téléchargement échoué (${response.status})`);
+  const total = Number(response.headers.get("Content-Length")) || 0;
+  if (!response.body || !onProgress) {
+    return URL.createObjectURL(new Blob([await response.arrayBuffer()], { type: mimeType }));
+  }
+  const reader = response.body.getReader();
+  const chunks = [];
+  let received = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    received += value.length;
+    if (total) onProgress(received / total);
+  }
+  const data = new Uint8Array(received);
+  let offset = 0;
+  for (const chunk of chunks) {
+    data.set(chunk, offset);
+    offset += chunk.length;
+  }
+  return URL.createObjectURL(new Blob([data], { type: mimeType }));
+}
+
+async function blobFromMirrors(fileName, mimeType, onProgress) {
+  let lastError;
+  for (const base of CORE_MIRRORS) {
+    try {
+      return await toBlobURL(`${base}/${fileName}`, mimeType, onProgress);
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError || new Error("Impossible de télécharger FFmpeg.");
+}
+
+function attachFfmpegEvents() {
   ffmpeg.on("log", ({ message }) => {
     if (message && /error|failed/i.test(message)) console.warn(message);
   });
   ffmpeg.on("progress", ({ progress }) => {
     if (busy) setProgress(0.15 + Math.max(0, Math.min(progress, 1)) * 0.8, "Encodage…");
   });
-  setProgress(0.08, "Téléchargement de FFmpeg (une seule fois)…");
-  await ffmpeg.load({
-    coreURL: await toBlobURL(`${base}/ffmpeg-core.js`, "text/javascript"),
-    wasmURL: await toBlobURL(`${base}/ffmpeg-core.wasm`, "application/wasm"),
+}
+
+async function loadFfmpeg() {
+  els.start.disabled = true;
+  attachFfmpegEvents();
+  setProgress(0.04, "Téléchargement de FFmpeg…");
+  const coreURL = await blobFromMirrors("ffmpeg-core.js", "text/javascript");
+  setProgress(0.08, "Téléchargement du moteur (environ 25 Mo)…");
+  const wasmURL = await blobFromMirrors("ffmpeg-core.wasm", "application/wasm", (ratio) => {
+    setProgress(0.08 + ratio * 0.82, `Téléchargement de FFmpeg… ${Math.round(ratio * 100)} %`);
   });
+  setProgress(0.92, "Initialisation de FFmpeg…");
+  await ffmpeg.load({ coreURL, wasmURL });
   setProgress(0, "Prêt. Ajoutez une vidéo.");
+  if (!busy) els.start.disabled = false;
 }
 
 function suggestedName() {
   return els.outName.value.trim() || "video.mp4";
 }
 
-function buildArgs(inputName, videoKbps, audioKbps, speed, mute) {
+function toVideoBlob(data) {
+  const bytes = data instanceof Uint8Array ? data : new Uint8Array(data);
+  return new Blob([bytes], { type: "video/mp4" });
+}
+
+function parseDuration(messages) {
+  const match = messages.join("\n").match(/Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/);
+  if (!match) return null;
+  return Number(match[1]) * 3600 + Number(match[2]) * 60 + Number(match[3]);
+}
+
+async function probeDuration(inputName) {
+  const lines = [];
+  const onLog = ({ message }) => {
+    if (message) lines.push(message);
+  };
+  ffmpeg.on("log", onLog);
+  try {
+    await ffmpeg.exec(["-hide_banner", "-i", inputName]);
+  } catch {
+    /* pas de fichier de sortie : normal */
+  }
+  ffmpeg.off("log", onLog);
+  return parseDuration(lines);
+}
+
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function estimateCrf(targetBytes, duration, width, height) {
+  const pixels = Math.max(320 * 240, (width || 1280) * (height || 720));
+  const bpp = (targetBytes * 8) / (Math.max(0.5, duration) * pixels);
+  if (bpp >= 0.14) return 26;
+  if (bpp >= 0.08) return 30;
+  if (bpp >= 0.045) return 34;
+  return 38;
+}
+
+function nextCrf(crf, actualBytes, targetBytes) {
+  const ratio = targetBytes / Math.max(1, actualBytes);
+  let estimated = Math.round(crf - 6 * Math.log2(clamp(ratio, 0.12, 8)));
+  if (actualBytes > targetBytes && estimated <= crf) estimated = crf + 3;
+  return clamp(estimated, 18, 40);
+}
+
+function buildArgs(inputName, crf, audioKbps, speed, mute) {
   const args = ["-y", "-i", inputName];
   if (Math.abs(speed - 1) >= 0.01) args.push("-vf", `setpts=PTS/${speed}`);
-  args.push("-c:v", "mpeg4", "-b:v", `${videoKbps}k`, "-pix_fmt", "yuv420p");
+  args.push(
+    "-c:v",
+    "libx264",
+    "-preset",
+    "ultrafast",
+    "-pix_fmt",
+    "yuv420p",
+    "-crf",
+    String(crf),
+    "-movflags",
+    "+faststart",
+  );
   if (mute) {
     args.push("-an");
   } else {
@@ -209,6 +322,15 @@ function buildArgs(inputName, videoKbps, audioKbps, speed, mute) {
   }
   args.push("output.mp4");
   return args;
+}
+
+async function encodeToBlob(args) {
+  const code = await ffmpeg.exec(args);
+  if (cancelFlag) throw new Error("Annulé");
+  if (code !== 0 && code !== true && code !== undefined) {
+    throw new Error("L'encodage a échoué.");
+  }
+  return toVideoBlob(await ffmpeg.readFile("output.mp4"));
 }
 
 async function startJob() {
@@ -223,18 +345,15 @@ async function startJob() {
     return;
   }
   if (!ffmpeg.loaded) {
-    alert("FFmpeg n'est pas encore prêt.");
+    alert("FFmpeg n'est pas encore prêt. Attendez « Prêt » en bas à droite.");
     return;
   }
 
   const speed = speedValue();
-  const duration = els.preview.duration;
-  const outDuration = Number.isFinite(duration) && duration > 0 ? duration / speed : 1;
   const mute = els.mute.checked;
   const audioKbps = mute ? 0 : 64;
-  const totalKbps = Math.max(80, Math.round((target * 1024 * 8) / outDuration));
-  const videoKbps = Math.max(48, totalKbps - audioKbps);
   const inputName = "input" + (file.name.match(/\.[^.]+$/)?.[0] || ".mp4");
+  const targetBytes = target * 1024 * 1024;
 
   busy = true;
   cancelFlag = false;
@@ -246,16 +365,42 @@ async function startJob() {
   try {
     await ffmpeg.writeFile(inputName, await fetchFile(file));
     if (cancelFlag) throw new Error("Annulé");
-    setProgress(0.12, "Encodage…");
-    const code = await ffmpeg.exec(buildArgs(inputName, videoKbps, audioKbps, speed, mute));
-    if (cancelFlag) throw new Error("Annulé");
-    if (code !== 0 && code !== true && code !== undefined) {
-      throw new Error("L'encodage a échoué.");
+    setProgress(0.08, "Analyse de la vidéo…");
+    const probed = await probeDuration(inputName);
+    const sourceDuration =
+      probed > 0 ? probed : Number.isFinite(els.preview.duration) && els.preview.duration > 0 ? els.preview.duration : 1;
+    const outDuration = sourceDuration / speed;
+    let crf = estimateCrf(
+      targetBytes,
+      outDuration,
+      els.preview.videoWidth,
+      els.preview.videoHeight,
+    );
+
+    for (let pass = 1; pass <= 3; pass += 1) {
+      if (cancelFlag) throw new Error("Annulé");
+      try {
+        await ffmpeg.deleteFile("output.mp4");
+      } catch {
+        /* ignore */
+      }
+      setProgress(pass === 1 ? 0.12 : 0.45 + pass * 0.15, `Encodage H.264 (qualité ${crf})…`);
+      resultBlob = await encodeToBlob(buildArgs(inputName, crf, audioKbps, speed, mute));
+      if (resultBlob.size <= targetBytes * 1.08) break;
+      if (pass === 3) break;
+      crf = nextCrf(crf, resultBlob.size, targetBytes * 0.96);
     }
-    const data = await ffmpeg.readFile("output.mp4");
-    resultBlob = new Blob([data.buffer], { type: "video/mp4" });
-    setProgress(1, `Terminé · ${formatSize(resultBlob.size)}`);
-    downloadBlob(resultBlob, suggestedName());
+
+    const name = suggestedName();
+    const size = formatSize(resultBlob.size);
+    const over = resultBlob.size > targetBytes * 1.12;
+    setProgress(1, `Compression réussie · ${name} · ${size}`, over ? "err" : "ok");
+    downloadBlob(resultBlob, name);
+    alert(
+      over
+        ? `Compression terminée, mais la taille reste au-dessus de l'objectif.\n\nFichier : ${name}\nTaille : ${size}\nObjectif : ${target} Mo`
+        : `Compression réussie.\n\nFichier : ${name}\nTaille : ${size}\nObjectif : ${target} Mo`,
+    );
     try {
       await ffmpeg.deleteFile(inputName);
       await ffmpeg.deleteFile("output.mp4");
@@ -263,10 +408,10 @@ async function startJob() {
       /* ignore */
     }
   } catch (error) {
-    setProgress(0, error.message || "Échec");
+    setProgress(0, error.message || "Échec", "err");
   } finally {
     busy = false;
-    els.start.disabled = false;
+    els.start.disabled = !ffmpeg.loaded;
     els.cancel.disabled = true;
   }
 }
@@ -308,8 +453,12 @@ els.cancel.addEventListener("click", () => {
     /* ignore */
   }
   ffmpeg = new FFmpeg();
+  els.start.disabled = true;
   setProgress(0, "Annulation…");
-  loadFfmpeg().catch((error) => setProgress(0, error.message));
+  loadFfmpeg().catch((error) => {
+    els.start.disabled = true;
+    setProgress(0, error.message || "Impossible de recharger FFmpeg.");
+  });
 });
 els.download.addEventListener("click", () => {
   if (resultBlob) downloadBlob(resultBlob, suggestedName());
@@ -354,6 +503,7 @@ els.seek.addEventListener("input", () => {
 });
 
 loadFfmpeg().catch((error) => {
-  setProgress(0, "Impossible de charger FFmpeg. Vérifiez Internet.");
+  els.start.disabled = true;
+  setProgress(0, "Impossible de charger FFmpeg. Vérifiez Internet et rechargez la page.");
   console.error(error);
 });

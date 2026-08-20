@@ -1,7 +1,7 @@
 .venv/
 __pycache__/
 *.pyc
-vendor/
+/vendor/
 *.mp4
 *.mov
 *.mkv
@@ -9,3 +9,6 @@ vendor/
 *.webm
 .DS_Store
 Thumbs.db
+build/
+dist/
+*.spec
