@@ -32,6 +32,17 @@ python -m http.server 8080 --directory docs
 
 Puis ouvrez `http://localhost:8080`. Ne pas ouvrir `index.html` en double-cliquant (`file://`) : le navigateur bloquerait FFmpeg.
 
+### Navigateurs compatibles
+
+| Navigateur | Encodage accéléré (WebCodecs) | Secours FFmpeg Wasm |
+| --- | --- | --- |
+| Chrome / Edge / Opera (récents) | Oui | Oui |
+| Firefox récent | Souvent oui (H.264 selon le système) | Oui |
+| Safari 17+ (macOS / iOS) | Oui si H.264 est encodable | Oui |
+| Internet Explorer | Non | Non |
+
+La page doit être ouverte en **HTTPS** (GitHub Pages) ou en **localhost**. Sur téléphone, restez sur l’onglet si la mémoire est limitée.
+
 ## Version Windows
 
 Double-cliquez sur `lancer.bat`.

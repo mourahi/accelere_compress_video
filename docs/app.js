@@ -15,12 +15,19 @@ const SPEED_LABELS = {
 };
 
 let ffmpeg = new FFmpeg();
+let ffmpegLoadPromise = null;
+let activeConversion = null;
+let encodeWorker = null;
+let keepAliveAbort = null;
+let keepAliveAudio = null;
+let keepAliveOsc = null;
 const files = [];
 let selected = 0;
 let objectUrl = "";
 let resultBlob = null;
 let busy = false;
 let cancelFlag = false;
+let fastEncodeOk = false;
 
 const els = {
   add: document.getElementById("btn-add"),
@@ -46,6 +53,7 @@ const els = {
   time: document.getElementById("time"),
   bar: document.getElementById("bar"),
   status: document.getElementById("status"),
+  compat: document.getElementById("compat"),
 };
 
 function formatSize(bytes) {
@@ -229,23 +237,153 @@ function attachFfmpegEvents() {
     if (message && /error|failed/i.test(message)) console.warn(message);
   });
   ffmpeg.on("progress", ({ progress }) => {
-    if (busy) setProgress(0.15 + Math.max(0, Math.min(progress, 1)) * 0.8, "Encodage…");
+    if (busy) setProgress(0.15 + Math.max(0, Math.min(progress, 1)) * 0.8, "Encodage FFmpeg…");
   });
 }
 
-async function loadFfmpeg() {
-  els.start.disabled = true;
-  attachFfmpegEvents();
-  setProgress(0.04, "Téléchargement de FFmpeg…");
-  const coreURL = await blobFromMirrors("ffmpeg-core.js", "text/javascript");
-  setProgress(0.08, "Téléchargement du moteur (environ 25 Mo)…");
-  const wasmURL = await blobFromMirrors("ffmpeg-core.wasm", "application/wasm", (ratio) => {
-    setProgress(0.08 + ratio * 0.82, `Téléchargement de FFmpeg… ${Math.round(ratio * 100)} %`);
+function webCodecsReady() {
+  return fastEncodeOk;
+}
+
+function browserLabel() {
+  const ua = navigator.userAgent;
+  if (/Edg\//.test(ua)) return "Edge";
+  if (/OPR\//.test(ua) || /Opera/.test(ua)) return "Opera";
+  if (/Chrome\//.test(ua) && !/Edg\//.test(ua)) return "Chrome";
+  if (/Firefox\//.test(ua)) return "Firefox";
+  if (/Safari\//.test(ua) && !/Chrome\//.test(ua)) return "Safari";
+  return "Ce navigateur";
+}
+
+function setCompat(message, kind) {
+  if (!els.compat) return;
+  els.compat.textContent = message;
+  els.compat.classList.remove("ok", "warn", "err");
+  if (kind) els.compat.classList.add(kind);
+}
+
+function wasmSupported() {
+  try {
+    return typeof WebAssembly === "object" && typeof WebAssembly.instantiate === "function";
+  } catch {
+    return false;
+  }
+}
+
+async function h264WebCodecsSupported() {
+  if (typeof VideoEncoder !== "function" || typeof VideoEncoder.isConfigSupported !== "function") {
+    return false;
+  }
+  if (typeof VideoDecoder !== "function") return false;
+  const codecs = ["avc1.42001E", "avc1.4D401E", "avc1.640028"];
+  for (const codec of codecs) {
+    try {
+      const result = await VideoEncoder.isConfigSupported({
+        codec,
+        width: 640,
+        height: 360,
+        bitrate: 500000,
+        framerate: 30,
+      });
+      if (result?.supported) return true;
+    } catch {
+      /* codec suivant */
+    }
+  }
+  return false;
+}
+
+async function startKeepAlive() {
+  stopKeepAlive();
+  keepAliveAbort = new AbortController();
+  if (navigator.locks?.request) {
+    navigator.locks
+      .request("compress-accelere-encode", { mode: "exclusive", signal: keepAliveAbort.signal }, () => {
+        return new Promise((resolve) => {
+          keepAliveAbort.signal.addEventListener("abort", () => resolve(), { once: true });
+        });
+      })
+      .catch(() => {});
+  }
+  try {
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if (!AudioCtx) return;
+    keepAliveAudio = new AudioCtx();
+    const osc = keepAliveAudio.createOscillator();
+    const gain = keepAliveAudio.createGain();
+    osc.frequency.value = 20;
+    gain.gain.value = 0.00003;
+    osc.connect(gain);
+    gain.connect(keepAliveAudio.destination);
+    osc.start();
+    keepAliveOsc = osc;
+    if (keepAliveAudio.state === "suspended") await keepAliveAudio.resume();
+  } catch {
+    /* ignore */
+  }
+}
+
+function stopKeepAlive() {
+  try {
+    keepAliveAbort?.abort();
+  } catch {
+    /* ignore */
+  }
+  keepAliveAbort = null;
+  try {
+    keepAliveOsc?.stop();
+  } catch {
+    /* ignore */
+  }
+  keepAliveOsc = null;
+  if (keepAliveAudio) {
+    keepAliveAudio.close().catch(() => {});
+    keepAliveAudio = null;
+  }
+}
+
+function stopEncodeWorker() {
+  if (!encodeWorker) return;
+  try {
+    encodeWorker.postMessage({ type: "cancel" });
+  } catch {
+    /* ignore */
+  }
+  try {
+    encodeWorker.terminate();
+  } catch {
+    /* ignore */
+  }
+  encodeWorker = null;
+}
+
+async function loadFfmpeg({ background = false } = {}) {
+  if (ffmpeg.loaded) return;
+  if (ffmpegLoadPromise) return ffmpegLoadPromise;
+  ffmpegLoadPromise = (async () => {
+    if (!background) {
+      els.start.disabled = true;
+      setProgress(0.04, "Téléchargement de FFmpeg…");
+    }
+    attachFfmpegEvents();
+    const coreURL = await blobFromMirrors("ffmpeg-core.js", "text/javascript");
+    if (!background) setProgress(0.08, "Téléchargement du moteur (environ 25 Mo)…");
+    const wasmURL = await blobFromMirrors("ffmpeg-core.wasm", "application/wasm", (ratio) => {
+      if (!background && !busy) {
+        setProgress(0.08 + ratio * 0.82, `Téléchargement de FFmpeg… ${Math.round(ratio * 100)} %`);
+      }
+    });
+    if (!background) setProgress(0.92, "Initialisation de FFmpeg…");
+    await ffmpeg.load({ coreURL, wasmURL });
+    if (!background && !busy) {
+      setProgress(0, "Prêt. Ajoutez une vidéo.");
+      els.start.disabled = false;
+    }
+  })().catch((error) => {
+    ffmpegLoadPromise = null;
+    throw error;
   });
-  setProgress(0.92, "Initialisation de FFmpeg…");
-  await ffmpeg.load({ coreURL, wasmURL });
-  setProgress(0, "Prêt. Ajoutez une vidéo.");
-  if (!busy) els.start.disabled = false;
+  return ffmpegLoadPromise;
 }
 
 function suggestedName() {
@@ -282,37 +420,36 @@ function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
 }
 
-function estimateCrf(targetBytes, duration, width, height) {
-  const pixels = Math.max(320 * 240, (width || 1280) * (height || 720));
-  const bpp = (targetBytes * 8) / (Math.max(0.5, duration) * pixels);
-  if (bpp >= 0.14) return 26;
-  if (bpp >= 0.08) return 30;
-  if (bpp >= 0.045) return 34;
-  return 38;
+function targetBitrates(targetBytes, duration, mute) {
+  const totalKbps = Math.max(80, Math.round((targetBytes * 8 * 0.92) / Math.max(0.5, duration) / 1000));
+  const audioKbps = mute ? 0 : Math.min(96, Math.max(48, Math.round(totalKbps * 0.08)));
+  return { videoKbps: Math.max(80, totalKbps - audioKbps), audioKbps };
 }
 
-function nextCrf(crf, actualBytes, targetBytes) {
-  const ratio = targetBytes / Math.max(1, actualBytes);
-  let estimated = Math.round(crf - 6 * Math.log2(clamp(ratio, 0.12, 8)));
-  if (actualBytes > targetBytes && estimated <= crf) estimated = crf + 3;
-  return clamp(estimated, 18, 40);
+function estimateCrf(probeCrf, probeBytes, targetBytes) {
+  if (probeBytes <= 0) return 23;
+  const ratio = clamp(targetBytes / probeBytes, 0.12, 10);
+  return Math.round(clamp(probeCrf - 6 * Math.log2(ratio), 12, 32));
 }
 
-function buildArgs(inputName, crf, audioKbps, speed, mute) {
+function buildArgs(inputName, { crf, videoKbps, audioKbps, speed, mute, preset }) {
   const args = ["-y", "-i", inputName];
   if (Math.abs(speed - 1) >= 0.01) args.push("-vf", `setpts=PTS/${speed}`);
   args.push(
     "-c:v",
     "libx264",
     "-preset",
-    "ultrafast",
+    preset || "veryfast",
     "-pix_fmt",
     "yuv420p",
-    "-crf",
-    String(crf),
-    "-movflags",
-    "+faststart",
+    "-x264-params",
+    "aq-mode=3",
   );
+  if (crf != null) args.push("-crf", String(crf));
+  if (videoKbps) {
+    args.push("-maxrate", `${videoKbps}k`, "-bufsize", `${videoKbps * 2}k`);
+  }
+  args.push("-movflags", "+faststart");
   if (mute) {
     args.push("-an");
   } else {
@@ -333,6 +470,179 @@ async function encodeToBlob(args) {
   return toVideoBlob(await ffmpeg.readFile("output.mp4"));
 }
 
+async function encodePass(inputName, options, label) {
+  if (cancelFlag) throw new Error("Annulé");
+  try {
+    await ffmpeg.deleteFile("output.mp4");
+  } catch {
+    /* ignore */
+  }
+  setProgress(options.progress || 0.2, label);
+  return encodeToBlob(buildArgs(inputName, options));
+}
+
+async function encodeWithFfmpeg(file, { speed, mute, targetBytes, sourceDuration }) {
+  const inputName = "input" + (file.name.match(/\.[^.]+$/)?.[0] || ".mp4");
+  await ffmpeg.writeFile(inputName, await fetchFile(file));
+  if (cancelFlag) throw new Error("Annulé");
+  setProgress(0.08, "Analyse de la vidéo…");
+  const probed = await probeDuration(inputName);
+  const duration =
+    probed > 0 ? probed : sourceDuration > 0 ? sourceDuration : 1;
+  const outDuration = duration / speed;
+  const { videoKbps, audioKbps } = targetBitrates(targetBytes, outDuration, mute);
+
+  let blob = await encodePass(
+    inputName,
+    { crf: 22, videoKbps, audioKbps, speed, mute, preset: "veryfast", progress: 0.12 },
+    "Analyse qualité…",
+  );
+  let crf = estimateCrf(22, blob.size, targetBytes);
+  const probeOk = blob.size <= targetBytes * 1.06 && blob.size >= targetBytes * 0.82;
+  if (!probeOk) {
+    blob = await encodePass(
+      inputName,
+      { crf, videoKbps, audioKbps, speed, mute, preset: "veryfast", progress: 0.42 },
+      "Encodage H.264…",
+    );
+    if (blob.size > targetBytes * 1.1 && crf < 32) {
+      crf = Math.min(32, crf + 2);
+      blob = await encodePass(
+        inputName,
+        { crf, videoKbps, audioKbps, speed, mute, preset: "veryfast", progress: 0.78 },
+        "Ajustement : un peu plus compact…",
+      );
+    } else if (blob.size < targetBytes * 0.82 && crf > 12) {
+      crf = Math.max(12, crf - 2);
+      blob = await encodePass(
+        inputName,
+        { crf, videoKbps, audioKbps, speed, mute, preset: "veryfast", progress: 0.78 },
+        "Ajustement : meilleure qualité…",
+      );
+    }
+  }
+  try {
+    await ffmpeg.deleteFile(inputName);
+    await ffmpeg.deleteFile("output.mp4");
+  } catch {
+    /* ignore */
+  }
+  return blob;
+}
+
+function encodeWithWebCodecsWorker(file, { mute, videoBps, audioBps, progressBase }) {
+  return new Promise((resolve, reject) => {
+    const worker = new Worker("./encode-worker.js", { type: "module" });
+    encodeWorker = worker;
+    worker.onmessage = (event) => {
+      const data = event.data || {};
+      if (data.type === "progress") {
+        setProgress(progressBase + Math.max(0, Math.min(data.progress, 1)) * 0.4, "Encodage accéléré…");
+      } else if (data.type === "done") {
+        encodeWorker = null;
+        worker.terminate();
+        resolve(new Blob([data.buffer], { type: "video/mp4" }));
+      } else if (data.type === "error") {
+        encodeWorker = null;
+        worker.terminate();
+        reject(new Error(data.message || "L'encodage accéléré a échoué."));
+      }
+    };
+    worker.onerror = (event) => {
+      encodeWorker = null;
+      try {
+        worker.terminate();
+      } catch {
+        /* ignore */
+      }
+      reject(new Error(event.message || "Le worker d'encodage a échoué."));
+    };
+    worker.postMessage({ type: "encode", file, mute, videoBps, audioBps });
+  });
+}
+
+async function encodeWithWebCodecs(file, { mute, targetBytes, duration }) {
+  const { videoKbps, audioKbps } = targetBitrates(targetBytes, duration, mute);
+  let bitrateScale = 1;
+
+  for (let pass = 1; pass <= 2; pass += 1) {
+    if (cancelFlag) throw new Error("Annulé");
+    const videoBps = Math.max(80_000, Math.round(videoKbps * 1000 * bitrateScale));
+    const audioBps = audioKbps * 1000;
+    const progressBase = pass === 1 ? 0.1 : 0.55;
+    let blob;
+    try {
+      blob = await encodeWithWebCodecsWorker(file, {
+        mute,
+        videoBps,
+        audioBps,
+        progressBase,
+      });
+    } catch (error) {
+      if (cancelFlag) throw new Error("Annulé");
+      console.warn("Worker indisponible, encodage dans l'onglet.", error);
+      blob = await encodeWithWebCodecsMain(file, { mute, videoBps, audioBps, progressBase });
+    }
+    if (blob.size <= targetBytes * 1.08 || pass === 2) return blob;
+    bitrateScale *= (targetBytes * 0.94) / blob.size;
+    setProgress(0.52, "Ajustement de la taille…");
+  }
+  throw new Error("L'encodage accéléré a échoué.");
+}
+
+async function encodeWithWebCodecsMain(file, { mute, videoBps, audioBps, progressBase }) {
+  const {
+    Input,
+    Output,
+    Conversion,
+    ALL_FORMATS,
+    BlobSource,
+    BufferTarget,
+    Mp4OutputFormat,
+  } = await import("https://cdn.jsdelivr.net/npm/mediabunny@1.55.1/+esm");
+
+  const input = new Input({
+    source: new BlobSource(file),
+    formats: ALL_FORMATS,
+  });
+  const output = new Output({
+    format: new Mp4OutputFormat({ fastStart: "in-memory" }),
+    target: new BufferTarget(),
+  });
+  const conversion = await Conversion.init({
+    input,
+    output,
+    video: {
+      codec: "avc",
+      bitrate: videoBps,
+      hardwareAcceleration: "prefer-hardware",
+      forceTranscode: true,
+    },
+    audio: mute
+      ? { discard: true }
+      : { codec: "aac", bitrate: audioBps, forceTranscode: true },
+  });
+  if (!conversion.isValid) {
+    const reason = (conversion.discardedTracks || [])
+      .map((track) => track.reason || track.message || "")
+      .filter(Boolean)
+      .join(" · ");
+    throw new Error(reason || "WebCodecs ne peut pas encoder cette vidéo.");
+  }
+  activeConversion = conversion;
+  conversion.onProgress = (progress) => {
+    if (busy) setProgress(progressBase + Math.max(0, Math.min(progress, 1)) * 0.4, "Encodage accéléré…");
+  };
+  try {
+    await conversion.execute();
+  } finally {
+    activeConversion = null;
+  }
+  const buffer = output.target.buffer;
+  if (!buffer || !buffer.byteLength) throw new Error("Fichier de sortie vide.");
+  return new Blob([buffer], { type: "video/mp4" });
+}
+
 async function startJob() {
   const file = currentFile();
   const target = targetMb();
@@ -344,51 +654,51 @@ async function startJob() {
     alert("Indiquez une taille souhaitée en Mo.");
     return;
   }
-  if (!ffmpeg.loaded) {
-    alert("FFmpeg n'est pas encore prêt. Attendez « Prêt » en bas à droite.");
-    return;
-  }
 
   const speed = speedValue();
   const mute = els.mute.checked;
-  const audioKbps = mute ? 0 : 64;
-  const inputName = "input" + (file.name.match(/\.[^.]+$/)?.[0] || ".mp4");
   const targetBytes = target * 1024 * 1024;
+  const previewDuration = els.preview.duration;
+  const sourceDuration =
+    Number.isFinite(previewDuration) && previewDuration > 0 ? previewDuration : 1;
+  const canUseWebCodecs = webCodecsReady() && Math.abs(speed - 1) < 0.01;
 
   busy = true;
   cancelFlag = false;
   resultBlob = null;
   els.start.disabled = true;
   els.cancel.disabled = false;
-  setProgress(0.04, "Lecture du fichier…");
+  setProgress(0.04, "Lecture du fichier… Vous pouvez changer d'onglet.");
+  await startKeepAlive();
 
   try {
-    await ffmpeg.writeFile(inputName, await fetchFile(file));
-    if (cancelFlag) throw new Error("Annulé");
-    setProgress(0.08, "Analyse de la vidéo…");
-    const probed = await probeDuration(inputName);
-    const sourceDuration =
-      probed > 0 ? probed : Number.isFinite(els.preview.duration) && els.preview.duration > 0 ? els.preview.duration : 1;
-    const outDuration = sourceDuration / speed;
-    let crf = estimateCrf(
-      targetBytes,
-      outDuration,
-      els.preview.videoWidth,
-      els.preview.videoHeight,
-    );
-
-    for (let pass = 1; pass <= 3; pass += 1) {
-      if (cancelFlag) throw new Error("Annulé");
+    if (canUseWebCodecs) {
       try {
-        await ffmpeg.deleteFile("output.mp4");
-      } catch {
-        /* ignore */
+        resultBlob = await encodeWithWebCodecs(file, {
+          mute,
+          targetBytes,
+          duration: sourceDuration / speed,
+        });
+      } catch (error) {
+        if (cancelFlag || /annul/i.test(error?.message || "")) throw error;
+        console.warn("WebCodecs indisponible, passage par FFmpeg.", error);
+        setProgress(0.08, "Passage par FFmpeg…");
+        await loadFfmpeg();
+        resultBlob = await encodeWithFfmpeg(file, {
+          speed,
+          mute,
+          targetBytes,
+          sourceDuration,
+        });
       }
-      setProgress(pass === 1 ? 0.12 : 0.45 + pass * 0.15, `Encodage H.264 (qualité ${crf})…`);
-      resultBlob = await encodeToBlob(buildArgs(inputName, crf, audioKbps, speed, mute));
-      if (resultBlob.size <= targetBytes * 1.08) break;
-      if (pass === 3) break;
-      crf = nextCrf(crf, resultBlob.size, targetBytes * 0.96);
+    } else {
+      await loadFfmpeg();
+      resultBlob = await encodeWithFfmpeg(file, {
+        speed,
+        mute,
+        targetBytes,
+        sourceDuration,
+      });
     }
 
     const name = suggestedName();
@@ -401,17 +711,13 @@ async function startJob() {
         ? `Compression terminée, mais la taille reste au-dessus de l'objectif.\n\nFichier : ${name}\nTaille : ${size}\nObjectif : ${target} Mo`
         : `Compression réussie.\n\nFichier : ${name}\nTaille : ${size}\nObjectif : ${target} Mo`,
     );
-    try {
-      await ffmpeg.deleteFile(inputName);
-      await ffmpeg.deleteFile("output.mp4");
-    } catch {
-      /* ignore */
-    }
   } catch (error) {
     setProgress(0, error.message || "Échec", "err");
   } finally {
+    stopEncodeWorker();
+    stopKeepAlive();
     busy = false;
-    els.start.disabled = !ffmpeg.loaded;
+    els.start.disabled = !(ffmpeg.loaded || webCodecsReady());
     els.cancel.disabled = true;
   }
 }
@@ -447,18 +753,31 @@ els.start.addEventListener("click", () => {
 });
 els.cancel.addEventListener("click", () => {
   cancelFlag = true;
+  stopEncodeWorker();
+  if (activeConversion) {
+    Promise.resolve(activeConversion.cancel()).catch(() => {});
+    activeConversion = null;
+  }
+  stopKeepAlive();
   try {
     ffmpeg.terminate();
   } catch {
     /* ignore */
   }
   ffmpeg = new FFmpeg();
-  els.start.disabled = true;
+  ffmpegLoadPromise = null;
   setProgress(0, "Annulation…");
-  loadFfmpeg().catch((error) => {
+  if (webCodecsReady()) {
+    els.start.disabled = false;
+    setProgress(0, "Annulé. Prêt.");
+    loadFfmpeg({ background: true }).catch((error) => console.warn(error));
+  } else {
     els.start.disabled = true;
-    setProgress(0, error.message || "Impossible de recharger FFmpeg.");
-  });
+    loadFfmpeg().catch((error) => {
+      els.start.disabled = true;
+      setProgress(0, error.message || "Impossible de recharger FFmpeg.");
+    });
+  }
 });
 els.download.addEventListener("click", () => {
   if (resultBlob) downloadBlob(resultBlob, suggestedName());
@@ -502,8 +821,48 @@ els.seek.addEventListener("input", () => {
   els.preview.currentTime = Number(els.seek.value) * els.preview.duration;
 });
 
-loadFfmpeg().catch((error) => {
+if (!window.isSecureContext && !/^(localhost|127\.0\.0\.1)$/.test(location.hostname)) {
   els.start.disabled = true;
-  setProgress(0, "Impossible de charger FFmpeg. Vérifiez Internet et rechargez la page.");
-  console.error(error);
-});
+  setProgress(0, "Ouvrez la page en HTTPS (ou en local).");
+  setCompat("L'encodage est bloqué en file://. Utilisez GitHub Pages ou localhost.", "err");
+} else if (!wasmSupported()) {
+  els.start.disabled = true;
+  setProgress(0, "Navigateur trop ancien.");
+  setCompat("WebAssembly est requis. Utilisez Chrome, Edge, Firefox ou Safari récents.", "err");
+} else {
+  h264WebCodecsSupported()
+    .then((ok) => {
+      fastEncodeOk = ok;
+      const name = browserLabel();
+      if (ok) {
+        els.start.disabled = false;
+        setProgress(0, "Prêt (encodage accéléré). Ajoutez une vidéo.");
+        setCompat(`${name} : compatible. Encodage accéléré (WebCodecs), FFmpeg en secours.`, "ok");
+        loadFfmpeg({ background: true }).catch((error) => console.warn(error));
+      } else {
+        setCompat(`${name} : encodage accéléré indisponible. Chargement de FFmpeg Wasm…`, "warn");
+        loadFfmpeg()
+          .then(() => {
+            if (!busy) {
+              setCompat(`${name} : compatible via FFmpeg Wasm (plus lent).`, "ok");
+            }
+          })
+          .catch((error) => {
+            els.start.disabled = true;
+            setProgress(0, "Impossible de charger FFmpeg. Vérifiez Internet et rechargez la page.");
+            setCompat(`${name} : échec du chargement de FFmpeg.`, "err");
+            console.error(error);
+          });
+      }
+    })
+    .catch((error) => {
+      console.error(error);
+      setCompat(`${browserLabel()} : test WebCodecs impossible. Chargement de FFmpeg…`, "warn");
+      loadFfmpeg().catch((loadError) => {
+        els.start.disabled = true;
+        setProgress(0, "Impossible de charger FFmpeg.");
+        setCompat("Navigateur incompatible ou hors ligne.", "err");
+        console.error(loadError);
+      });
+    });
+}

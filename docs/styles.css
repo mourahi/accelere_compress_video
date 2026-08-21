@@ -253,6 +253,18 @@ select {
   font-size: 12px;
 }
 
+#compat.ok {
+  color: var(--accent);
+}
+
+#compat.warn {
+  color: #fbbf24;
+}
+
+#compat.err {
+  color: #f87171;
+}
+
 @media (max-width: 900px) {
   .app {
     grid-template-columns: 1fr;
