@@ -19,8 +19,9 @@ Utilisation :
 1. Ouvrez la page, attendez « Prêt ».
 2. **Ajouter** une vidéo.
 3. Indiquez la taille en Mo, la vitesse, et éventuellement **Supprimer l'audio**.
-4. **Lancer**. Le fichier MP4 se télécharge ensuite.
-5. **Télécharger** relance le téléchargement du dernier export.
+4. Optionnel : **Début ici** / **Fin ici** pour n’exporter qu’une plage (ça accélère l’encodage). **Image** enregistre l’image affichée.
+5. **Lancer**. Le fichier MP4 se télécharge ensuite.
+6. **Télécharger** relance le téléchargement du dernier export.
 
 Le premier chargement télécharge FFmpeg (~25 Mo), puis le navigateur le garde en cache.
 
@@ -48,6 +49,18 @@ La page doit être ouverte en **HTTPS** (GitHub Pages) ou en **localhost**. Sur 
 Double-cliquez sur `lancer.bat`.
 
 Au premier lancement, l'application installe les dépendances Python et télécharge FFmpeg.
+
+En plus de la compression et de la vitesse, la version Windows permet d’**éditer** :
+
+- couper le début / la fin, ou garder plusieurs extraits
+- joindre toutes les vidéos en un seul fichier
+- rotation, miroir, recadrage (16:9, 9:16, 1:1, 4:3)
+- volume, fondus, texte overlay
+- luminosité / contraste / saturation
+- inverser la vidéo
+- remplacer l’audio par un MP3
+- extraire l’image affichée (JPEG / PNG)
+- supprimer le fichier d’origine après un export réussi, via un bouton dédié
 
 ## Prérequis Windows
 

@@ -23,7 +23,7 @@ self.onmessage = async (event) => {
   }
   if (data.type !== "encode") return;
 
-  const { file, mute, videoBps, audioBps } = data;
+  const { file, mute, videoBps, audioBps, trim } = data;
   try {
     const input = new Input({
       source: new BlobSource(file),
@@ -33,7 +33,7 @@ self.onmessage = async (event) => {
       format: new Mp4OutputFormat({ fastStart: "in-memory" }),
       target: new BufferTarget(),
     });
-    conversion = await Conversion.init({
+    const options = {
       input,
       output,
       video: {
@@ -45,7 +45,11 @@ self.onmessage = async (event) => {
       audio: mute
         ? { discard: true }
         : { codec: "aac", bitrate: audioBps, forceTranscode: true },
-    });
+    };
+    if (trim && (trim.start > 0.05 || trim.end > trim.start)) {
+      options.trim = { start: trim.start, end: trim.end };
+    }
+    conversion = await Conversion.init(options);
     if (!conversion.isValid) {
       const reason = (conversion.discardedTracks || [])
         .map((track) => track.reason || track.message || "")

@@ -22,12 +22,14 @@ let keepAliveAbort = null;
 let keepAliveAudio = null;
 let keepAliveOsc = null;
 const files = [];
+const trims = [];
 let selected = 0;
 let objectUrl = "";
 let resultBlob = null;
 let busy = false;
 let cancelFlag = false;
 let fastEncodeOk = false;
+let progressLocked = false;
 
 const els = {
   add: document.getElementById("btn-add"),
@@ -54,6 +56,14 @@ const els = {
   bar: document.getElementById("bar"),
   status: document.getElementById("status"),
   compat: document.getElementById("compat"),
+  markInBtn: document.getElementById("btn-in"),
+  markOutBtn: document.getElementById("btn-out"),
+  resetTrim: document.getElementById("btn-reset-trim"),
+  frame: document.getElementById("btn-frame"),
+  trimLabel: document.getElementById("trim-label"),
+  trimSpan: document.getElementById("trim-span"),
+  markIn: document.getElementById("mark-in"),
+  markOut: document.getElementById("mark-out"),
 };
 
 function formatSize(bytes) {
@@ -75,6 +85,42 @@ function formatTime(seconds) {
 
 function currentFile() {
   return files[selected] || null;
+}
+
+function sourceDuration() {
+  const duration = els.preview.duration;
+  return Number.isFinite(duration) && duration > 0 ? duration : 0;
+}
+
+function currentTrim() {
+  const duration = sourceDuration();
+  const stored = trims[selected] || { start: 0, end: 0 };
+  const start = Math.max(0, stored.start || 0);
+  const end = stored.end > start ? stored.end : duration || start;
+  return { start, end: duration ? Math.min(end, duration) : end };
+}
+
+function clipDuration() {
+  const duration = sourceDuration();
+  const trim = currentTrim();
+  if (!duration) return 0;
+  return Math.max(0.05, trim.end - trim.start);
+}
+
+function refreshTrimLabel() {
+  if (els.trimLabel) {
+    const duration = sourceDuration();
+    if (!duration) {
+      els.trimLabel.textContent = "Toute la vidéo";
+    } else {
+      const trim = currentTrim();
+      els.trimLabel.textContent =
+        trim.start <= 0.05 && duration - trim.end <= 0.05
+          ? "Toute la vidéo"
+          : `Coupe ${formatTime(trim.start)} → ${formatTime(trim.end)}`;
+    }
+  }
+  updateTrimMarks();
 }
 
 function speedValue() {
@@ -103,10 +149,47 @@ function atempoFilter(speed) {
 }
 
 function setProgress(pct, message, kind) {
+  if (progressLocked && kind !== "err" && pct < 1) return;
+  if (kind === "ok") {
+    pct = 1;
+    progressLocked = true;
+  } else if (kind === "err") {
+    progressLocked = false;
+  } else if (pct <= 0) {
+    progressLocked = false;
+  }
   els.bar.style.width = `${Math.max(0, Math.min(100, pct * 100))}%`;
   if (message) els.status.textContent = message;
   els.status.classList.remove("ok", "err");
   if (kind) els.status.classList.add(kind);
+}
+
+function updateTrimMarks() {
+  const duration = sourceDuration();
+  if (!els.trimSpan || !els.markIn || !els.markOut) return;
+  if (!duration) {
+    els.trimSpan.style.display = "none";
+    els.markIn.hidden = true;
+    els.markOut.hidden = true;
+    return;
+  }
+  const trim = currentTrim();
+  const full = trim.start <= 0.05 && duration - trim.end <= 0.05;
+  if (full) {
+    els.trimSpan.style.display = "none";
+    els.markIn.hidden = true;
+    els.markOut.hidden = true;
+    return;
+  }
+  const left = (trim.start / duration) * 100;
+  const right = (trim.end / duration) * 100;
+  els.trimSpan.style.display = "block";
+  els.trimSpan.style.left = `${left}%`;
+  els.trimSpan.style.width = `${Math.max(0.5, right - left)}%`;
+  els.markIn.hidden = false;
+  els.markOut.hidden = false;
+  els.markIn.style.left = `${left}%`;
+  els.markOut.style.left = `${right}%`;
 }
 
 function refreshSummary() {
@@ -130,13 +213,19 @@ function refreshSummary() {
     els.summary.textContent = "Indiquez une taille en Mo.";
     return;
   }
-  const outDuration = Number.isFinite(duration) ? duration / speed : 0;
+  const outDuration = clipDuration() / speed;
   const mute = els.mute.checked ? "sans audio" : "avec audio";
-  els.summary.textContent = `Export ≈ ${target} Mo  ·  ${SPEED_LABELS[speed] || speed + "×"}  ·  ${formatTime(outDuration)}  ·  ${mute}`;
+  const trim = currentTrim();
+  const cut =
+    duration && (trim.start > 0.05 || duration - trim.end > 0.05) ? "  ·  coupe" : "";
+  els.summary.textContent = `Export ≈ ${target} Mo  ·  ${SPEED_LABELS[speed] || speed + "×"}  ·  ${formatTime(outDuration)}  ·  ${mute}${cut}`;
+  refreshTrimLabel();
   if (!els.outName.value.trim() || els.outName.dataset.auto !== "no") {
     const stem = file.name.replace(/\.[^.]+$/, "");
     const speedBit = speed !== 1 ? `_${String(speed).replace(".", "p")}x` : "";
-    els.outName.value = `${stem}${speedBit}_${Math.round(target)}mo.mp4`;
+    const cutBit =
+      duration && (trim.start > 0.05 || duration - trim.end > 0.05) ? "_coupe" : "";
+    els.outName.value = `${stem}${speedBit}${cutBit}_${Math.round(target)}mo.mp4`;
     els.outName.dataset.auto = "yes";
   }
 }
@@ -159,6 +248,7 @@ function hidePreview() {
   els.time.textContent = "0:00 / 0:00";
   if (objectUrl) URL.revokeObjectURL(objectUrl);
   objectUrl = "";
+  refreshTrimLabel();
 }
 
 function syncList() {
@@ -167,6 +257,7 @@ function syncList() {
     els.list.disabled = true;
     els.list.innerHTML = "<option>Aucune vidéo</option>";
     hidePreview();
+    refreshTrimLabel();
     refreshSummary();
     return;
   }
@@ -237,7 +328,7 @@ function attachFfmpegEvents() {
     if (message && /error|failed/i.test(message)) console.warn(message);
   });
   ffmpeg.on("progress", ({ progress }) => {
-    if (busy) setProgress(0.15 + Math.max(0, Math.min(progress, 1)) * 0.8, "Encodage FFmpeg…");
+    if (busy) setProgress(0.12 + Math.max(0, Math.min(progress, 1)) * 0.86, "Encodage FFmpeg…");
   });
 }
 
@@ -432,8 +523,11 @@ function estimateCrf(probeCrf, probeBytes, targetBytes) {
   return Math.round(clamp(probeCrf - 6 * Math.log2(ratio), 12, 32));
 }
 
-function buildArgs(inputName, { crf, videoKbps, audioKbps, speed, mute, preset }) {
-  const args = ["-y", "-i", inputName];
+function buildArgs(inputName, { crf, videoKbps, audioKbps, speed, mute, preset, trimStart, trimDuration }) {
+  const args = ["-y"];
+  if (trimStart > 0.05) args.push("-ss", String(trimStart));
+  if (trimDuration > 0) args.push("-t", String(trimDuration));
+  args.push("-i", inputName);
   if (Math.abs(speed - 1) >= 0.01) args.push("-vf", `setpts=PTS/${speed}`);
   args.push(
     "-c:v",
@@ -481,7 +575,7 @@ async function encodePass(inputName, options, label) {
   return encodeToBlob(buildArgs(inputName, options));
 }
 
-async function encodeWithFfmpeg(file, { speed, mute, targetBytes, sourceDuration }) {
+async function encodeWithFfmpeg(file, { speed, mute, targetBytes, sourceDuration, trimStart, trimEnd }) {
   const inputName = "input" + (file.name.match(/\.[^.]+$/)?.[0] || ".mp4");
   await ffmpeg.writeFile(inputName, await fetchFile(file));
   if (cancelFlag) throw new Error("Annulé");
@@ -489,12 +583,16 @@ async function encodeWithFfmpeg(file, { speed, mute, targetBytes, sourceDuration
   const probed = await probeDuration(inputName);
   const duration =
     probed > 0 ? probed : sourceDuration > 0 ? sourceDuration : 1;
-  const outDuration = duration / speed;
+  const start = Math.max(0, trimStart || 0);
+  const end = trimEnd > start ? Math.min(trimEnd, duration) : duration;
+  const trimDuration = Math.max(0.05, end - start);
+  const outDuration = trimDuration / speed;
   const { videoKbps, audioKbps } = targetBitrates(targetBytes, outDuration, mute);
+  const trim = { trimStart: start, trimDuration };
 
   let blob = await encodePass(
     inputName,
-    { crf: 22, videoKbps, audioKbps, speed, mute, preset: "veryfast", progress: 0.12 },
+    { crf: 22, videoKbps, audioKbps, speed, mute, preset: "veryfast", progress: 0.12, ...trim },
     "Analyse qualité…",
   );
   let crf = estimateCrf(22, blob.size, targetBytes);
@@ -502,21 +600,21 @@ async function encodeWithFfmpeg(file, { speed, mute, targetBytes, sourceDuration
   if (!probeOk) {
     blob = await encodePass(
       inputName,
-      { crf, videoKbps, audioKbps, speed, mute, preset: "veryfast", progress: 0.42 },
+      { crf, videoKbps, audioKbps, speed, mute, preset: "veryfast", progress: 0.42, ...trim },
       "Encodage H.264…",
     );
     if (blob.size > targetBytes * 1.1 && crf < 32) {
       crf = Math.min(32, crf + 2);
       blob = await encodePass(
         inputName,
-        { crf, videoKbps, audioKbps, speed, mute, preset: "veryfast", progress: 0.78 },
+        { crf, videoKbps, audioKbps, speed, mute, preset: "veryfast", progress: 0.78, ...trim },
         "Ajustement : un peu plus compact…",
       );
     } else if (blob.size < targetBytes * 0.82 && crf > 12) {
       crf = Math.max(12, crf - 2);
       blob = await encodePass(
         inputName,
-        { crf, videoKbps, audioKbps, speed, mute, preset: "veryfast", progress: 0.78 },
+        { crf, videoKbps, audioKbps, speed, mute, preset: "veryfast", progress: 0.78, ...trim },
         "Ajustement : meilleure qualité…",
       );
     }
@@ -530,14 +628,15 @@ async function encodeWithFfmpeg(file, { speed, mute, targetBytes, sourceDuration
   return blob;
 }
 
-function encodeWithWebCodecsWorker(file, { mute, videoBps, audioBps, progressBase }) {
+function encodeWithWebCodecsWorker(file, { mute, videoBps, audioBps, progressBase, trim }) {
   return new Promise((resolve, reject) => {
     const worker = new Worker("./encode-worker.js", { type: "module" });
     encodeWorker = worker;
     worker.onmessage = (event) => {
       const data = event.data || {};
       if (data.type === "progress") {
-        setProgress(progressBase + Math.max(0, Math.min(data.progress, 1)) * 0.4, "Encodage accéléré…");
+        if (encodeWorker !== worker) return;
+        setProgress(progressBase + Math.max(0, Math.min(data.progress, 1)) * 0.88, "Encodage accéléré…");
       } else if (data.type === "done") {
         encodeWorker = null;
         worker.terminate();
@@ -557,11 +656,11 @@ function encodeWithWebCodecsWorker(file, { mute, videoBps, audioBps, progressBas
       }
       reject(new Error(event.message || "Le worker d'encodage a échoué."));
     };
-    worker.postMessage({ type: "encode", file, mute, videoBps, audioBps });
+    worker.postMessage({ type: "encode", file, mute, videoBps, audioBps, trim });
   });
 }
 
-async function encodeWithWebCodecs(file, { mute, targetBytes, duration }) {
+async function encodeWithWebCodecs(file, { mute, targetBytes, duration, trim }) {
   const { videoKbps, audioKbps } = targetBitrates(targetBytes, duration, mute);
   let bitrateScale = 1;
 
@@ -577,11 +676,12 @@ async function encodeWithWebCodecs(file, { mute, targetBytes, duration }) {
         videoBps,
         audioBps,
         progressBase,
+        trim,
       });
     } catch (error) {
       if (cancelFlag) throw new Error("Annulé");
       console.warn("Worker indisponible, encodage dans l'onglet.", error);
-      blob = await encodeWithWebCodecsMain(file, { mute, videoBps, audioBps, progressBase });
+      blob = await encodeWithWebCodecsMain(file, { mute, videoBps, audioBps, progressBase, trim });
     }
     if (blob.size <= targetBytes * 1.08 || pass === 2) return blob;
     bitrateScale *= (targetBytes * 0.94) / blob.size;
@@ -590,7 +690,7 @@ async function encodeWithWebCodecs(file, { mute, targetBytes, duration }) {
   throw new Error("L'encodage accéléré a échoué.");
 }
 
-async function encodeWithWebCodecsMain(file, { mute, videoBps, audioBps, progressBase }) {
+async function encodeWithWebCodecsMain(file, { mute, videoBps, audioBps, progressBase, trim }) {
   const {
     Input,
     Output,
@@ -609,7 +709,7 @@ async function encodeWithWebCodecsMain(file, { mute, videoBps, audioBps, progres
     format: new Mp4OutputFormat({ fastStart: "in-memory" }),
     target: new BufferTarget(),
   });
-  const conversion = await Conversion.init({
+  const options = {
     input,
     output,
     video: {
@@ -621,7 +721,11 @@ async function encodeWithWebCodecsMain(file, { mute, videoBps, audioBps, progres
     audio: mute
       ? { discard: true }
       : { codec: "aac", bitrate: audioBps, forceTranscode: true },
-  });
+  };
+  if (trim && (trim.start > 0.05 || trim.end > trim.start)) {
+    options.trim = { start: trim.start, end: trim.end };
+  }
+  const conversion = await Conversion.init(options);
   if (!conversion.isValid) {
     const reason = (conversion.discardedTracks || [])
       .map((track) => track.reason || track.message || "")
@@ -631,7 +735,7 @@ async function encodeWithWebCodecsMain(file, { mute, videoBps, audioBps, progres
   }
   activeConversion = conversion;
   conversion.onProgress = (progress) => {
-    if (busy) setProgress(progressBase + Math.max(0, Math.min(progress, 1)) * 0.4, "Encodage accéléré…");
+    if (busy) setProgress(progressBase + Math.max(0, Math.min(progress, 1)) * 0.88, "Encodage accéléré…");
   };
   try {
     await conversion.execute();
@@ -659,12 +763,16 @@ async function startJob() {
   const mute = els.mute.checked;
   const targetBytes = target * 1024 * 1024;
   const previewDuration = els.preview.duration;
-  const sourceDuration =
+  const fullDuration =
     Number.isFinite(previewDuration) && previewDuration > 0 ? previewDuration : 1;
+  const trim = currentTrim();
+  const trimEnd = trim.end > trim.start ? trim.end : fullDuration;
+  const sourceDuration = Math.max(0.05, trimEnd - trim.start);
   const canUseWebCodecs = webCodecsReady() && Math.abs(speed - 1) < 0.01;
 
   busy = true;
   cancelFlag = false;
+  progressLocked = false;
   resultBlob = null;
   els.start.disabled = true;
   els.cancel.disabled = false;
@@ -678,6 +786,7 @@ async function startJob() {
           mute,
           targetBytes,
           duration: sourceDuration / speed,
+          trim: { start: trim.start, end: trimEnd },
         });
       } catch (error) {
         if (cancelFlag || /annul/i.test(error?.message || "")) throw error;
@@ -688,7 +797,9 @@ async function startJob() {
           speed,
           mute,
           targetBytes,
-          sourceDuration,
+          sourceDuration: fullDuration,
+          trimStart: trim.start,
+          trimEnd: trimEnd,
         });
       }
     } else {
@@ -697,7 +808,9 @@ async function startJob() {
         speed,
         mute,
         targetBytes,
-        sourceDuration,
+        sourceDuration: fullDuration,
+        trimStart: trim.start,
+        trimEnd: trimEnd,
       });
     }
 
@@ -706,6 +819,7 @@ async function startJob() {
     const over = resultBlob.size > targetBytes * 1.12;
     setProgress(1, `Compression réussie · ${name} · ${size}`, over ? "err" : "ok");
     downloadBlob(resultBlob, name);
+    await new Promise((resolve) => requestAnimationFrame(() => setTimeout(resolve, 40)));
     alert(
       over
         ? `Compression terminée, mais la taille reste au-dessus de l'objectif.\n\nFichier : ${name}\nTaille : ${size}\nObjectif : ${target} Mo`
@@ -724,7 +838,10 @@ async function startJob() {
 
 els.add.addEventListener("click", () => els.input.click());
 els.input.addEventListener("change", () => {
-  for (const file of els.input.files || []) files.push(file);
+  for (const file of els.input.files || []) {
+    files.push(file);
+    trims.push({ start: 0, end: 0 });
+  }
   selected = files.length ? files.length - 1 : 0;
   els.input.value = "";
   els.outName.dataset.auto = "yes";
@@ -732,6 +849,7 @@ els.input.addEventListener("change", () => {
 });
 els.clear.addEventListener("click", () => {
   files.length = 0;
+  trims.length = 0;
   selected = 0;
   resultBlob = null;
   syncList();
@@ -739,6 +857,7 @@ els.clear.addEventListener("click", () => {
 els.remove.addEventListener("click", () => {
   if (!files.length) return;
   files.splice(selected, 1);
+  trims.splice(selected, 1);
   selected = Math.max(0, files.length - 1);
   resultBlob = null;
   syncList();
@@ -796,9 +915,56 @@ els.mute.addEventListener("change", refreshSummary);
 els.outName.addEventListener("input", () => {
   els.outName.dataset.auto = "no";
 });
+function setTrim(start, end) {
+  const duration = sourceDuration();
+  trims[selected] = {
+    start: Math.max(0, start),
+    end: duration ? Math.min(end, duration) : end,
+  };
+  refreshTrimLabel();
+  refreshSummary();
+}
+
+els.markInBtn?.addEventListener("click", () => {
+  if (!sourceDuration()) return;
+  const trim = currentTrim();
+  const start = els.preview.currentTime;
+  setTrim(start, Math.max(start + 0.1, trim.end || sourceDuration()));
+});
+els.markOutBtn?.addEventListener("click", () => {
+  if (!sourceDuration()) return;
+  const trim = currentTrim();
+  const end = els.preview.currentTime;
+  setTrim(Math.min(trim.start, Math.max(0, end - 0.1)), end);
+});
+els.resetTrim?.addEventListener("click", () => {
+  const duration = sourceDuration();
+  setTrim(0, duration || 0);
+});
+els.frame?.addEventListener("click", () => {
+  const video = els.preview;
+  if (!video.videoWidth) {
+    alert("Ajoutez une vidéo et allez à l'image voulue.");
+    return;
+  }
+  const canvas = document.createElement("canvas");
+  canvas.width = video.videoWidth;
+  canvas.height = video.videoHeight;
+  canvas.getContext("2d").drawImage(video, 0, 0);
+  canvas.toBlob((blob) => {
+    if (!blob) return;
+    const file = currentFile();
+    const stem = file ? file.name.replace(/\.[^.]+$/, "") : "image";
+    downloadBlob(blob, `${stem}_${formatTime(video.currentTime).replace(/:/g, "-")}.jpg`);
+  }, "image/jpeg", 0.92);
+});
 els.play.addEventListener("click", () => {
   if (!els.preview.src) return;
   if (els.preview.paused) {
+    const trim = currentTrim();
+    if (els.preview.currentTime < trim.start || els.preview.currentTime >= trim.end - 0.05) {
+      els.preview.currentTime = trim.start;
+    }
     els.preview.playbackRate = speedValue();
     els.preview.play();
     els.play.textContent = "❚❚";
@@ -807,9 +973,21 @@ els.play.addEventListener("click", () => {
     els.play.textContent = "▶";
   }
 });
-els.preview.addEventListener("loadedmetadata", refreshSummary);
+els.preview.addEventListener("loadedmetadata", () => {
+  const stored = trims[selected];
+  if (stored && !(stored.end > stored.start)) {
+    stored.end = sourceDuration();
+  }
+  refreshSummary();
+  refreshTrimLabel();
+});
 els.preview.addEventListener("timeupdate", () => {
   const duration = els.preview.duration || 1;
+  const trim = currentTrim();
+  if (!els.preview.paused && els.preview.currentTime >= trim.end - 0.05 && trim.end < duration - 0.02) {
+    els.preview.pause();
+    els.play.textContent = "▶";
+  }
   els.seek.value = String(els.preview.currentTime / duration);
   els.time.textContent = `${formatTime(els.preview.currentTime)} / ${formatTime(duration)}`;
 });

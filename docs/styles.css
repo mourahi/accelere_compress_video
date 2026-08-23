@@ -1,12 +1,15 @@
 :root {
-  --bg: #0f1419;
-  --card: #1a222c;
-  --card-alt: #151c24;
-  --text: #e8eef4;
-  --muted: #93a4b5;
-  --accent: #2dd4bf;
-  --accent-hover: #14b8a6;
-  --ink: #042f2e;
+  --bg: #0b0d12;
+  --card: #151922;
+  --card-alt: #0f131a;
+  --line: #2a3140;
+  --text: #eef1f6;
+  --muted: #8b94a5;
+  --accent: #5b8def;
+  --accent-hover: #4a7ad6;
+  --ink: #f7f9ff;
+  --mark: #f0c14b;
+  --preview: #07080c;
 }
 
 * {
@@ -24,10 +27,10 @@ body {
 
 .app {
   display: grid;
-  grid-template-columns: 340px 1fr;
-  gap: 16px;
-  padding: 16px;
-  max-width: 1280px;
+  grid-template-columns: 360px 1fr;
+  gap: 18px;
+  padding: 20px;
+  max-width: 1360px;
   margin: 0 auto;
   min-height: 100vh;
 }
@@ -40,22 +43,44 @@ body {
 
 .card {
   background: var(--card);
-  border-radius: 14px;
-  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  padding: 18px;
 }
 
 .top-btns {
   display: inline-flex;
   gap: 8px;
   background: var(--card);
-  border-radius: 10px;
-  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 8px;
   width: fit-content;
 }
 
-h1 {
+.brand {
+  margin-bottom: 4px;
+}
+
+.brand h1,
+h1,
+h2 {
   margin: 0 0 12px;
   font-size: 18px;
+  font-weight: 700;
+}
+
+.brand h1 {
+  margin-bottom: 2px;
+}
+
+.brand .muted {
+  margin: 0 0 12px;
+  font-size: 12px;
+}
+
+h2 {
+  font-size: 16px;
 }
 
 .muted {
@@ -110,7 +135,7 @@ label.muted {
 input,
 select {
   background: var(--card-alt);
-  border: 0;
+  border: 1px solid var(--line);
   color: var(--text);
   border-radius: 8px;
   padding: 8px 10px;
@@ -165,8 +190,12 @@ select {
   background: var(--accent-hover);
 }
 
+.btn.ghost {
+  border: 1px solid var(--line);
+}
+
 .btn.ghost:hover:not(:disabled) {
-  background: #243040;
+  background: #252b36;
 }
 
 .preview-card {
@@ -178,8 +207,8 @@ select {
 .preview-wrap {
   position: relative;
   flex: 1;
-  background: #0b1016;
-  border-radius: 10px;
+  background: var(--preview);
+  border-radius: 12px;
   overflow: hidden;
   min-height: 280px;
 }
@@ -211,14 +240,83 @@ select {
   margin-top: 12px;
 }
 
+.edit-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+#trim-label {
+  font-size: 12px;
+}
+
 .play {
   width: 44px;
   height: 36px;
   font-size: 16px;
 }
 
-#seek {
+.seek-wrap {
+  position: relative;
   flex: 1;
+  min-width: 0;
+  height: 28px;
+  display: flex;
+  align-items: center;
+}
+
+.seek-overlay {
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  height: 8px;
+  border-radius: 99px;
+  background: var(--line);
+  pointer-events: none;
+  z-index: 0;
+}
+
+.trim-span {
+  display: none;
+  position: absolute;
+  top: 0;
+  height: 100%;
+  background: var(--accent);
+  border-radius: 99px;
+  opacity: 0.45;
+}
+
+.trim-mark {
+  position: absolute;
+  top: 50%;
+  width: 3px;
+  height: 20px;
+  margin-left: -1px;
+  transform: translateY(-50%);
+  background: var(--mark);
+  border-radius: 2px;
+  box-shadow: 0 0 0 1px #07080c;
+}
+
+.trim-mark::after {
+  content: "";
+  position: absolute;
+  top: -5px;
+  left: 50%;
+  transform: translateX(-50%);
+  border-left: 5px solid transparent;
+  border-right: 5px solid transparent;
+  border-top: 6px solid var(--mark);
+}
+
+#seek {
+  position: relative;
+  z-index: 1;
+  width: 100%;
+  margin: 0;
+  background: transparent;
   accent-color: var(--accent);
 }
 
